@@ -1,27 +1,41 @@
 "use client"
 
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { getDiscordOAuthURL } from "@/lib/api";
 
 interface User {
   id: string;
   username: string;
-  discriminator: string;
+  discriminator?: string;
   avatar: string;
   email?: string;
 }
 
+interface Guild {
+  id: string;
+  name: string;
+  icon: string | null;
+  owner: boolean;
+}
+
 interface AuthContextType {
   user: User | null;
+  guilds: Guild[];
   isLoading: boolean;
   isAuthenticated: boolean;
   login: () => void;
-  logout: () => void;
+  logout: () => Promise<void>;
+  refreshSession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Mock user for demo purposes - In production, this would come from your API
+// Check if we're in demo mode (no OAuth configured)
+const isDemoMode = () => {
+  const clientId = process.env.NEXT_PUBLIC_DISCORD_CLIENT_ID;
+  return !clientId || clientId === "your_discord_client_id";
+};
+
+// Mock user for demo purposes
 const MOCK_USER: User = {
   id: "123456789012345678",
   username: "DemoUser",
@@ -29,49 +43,115 @@ const MOCK_USER: User = {
   avatar: "https://cdn.discordapp.com/embed/avatars/0.png",
 };
 
+const MOCK_GUILDS: Guild[] = [
+  { id: "1", name: "Gaming Galaxy", icon: null, owner: true },
+  { id: "2", name: "Creative Hub", icon: null, owner: false },
+  { id: "3", name: "Study Together", icon: null, owner: false },
+];
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [guilds, setGuilds] = useState<Guild[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    // Check for existing session
-    const checkSession = () => {
-      const savedUser = localStorage.getItem("officialx_user");
-      if (savedUser) {
-        try {
-          setUser(JSON.parse(savedUser));
-        } catch {
-          localStorage.removeItem("officialx_user");
+  const checkSession = async () => {
+    try {
+      // First, check for user cookie (quick check)
+      const userCookie = document.cookie
+        .split("; ")
+        .find((row) => row.startsWith("officialx_user="));
+
+      if (userCookie) {
+        const userData = JSON.parse(decodeURIComponent(userCookie.split("=")[1]));
+        setUser(userData);
+      }
+
+      // Then verify with server and get full data
+      const response = await fetch("/api/auth/me", {
+        credentials: "include",
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setUser(data.user);
+        setGuilds(data.guilds || []);
+      } else {
+        // Clear state if not authenticated
+        setUser(null);
+        setGuilds([]);
+      }
+    } catch (error) {
+      console.error("Failed to check session:", error);
+      // In demo mode or on error, check localStorage
+      if (isDemoMode()) {
+        const savedUser = localStorage.getItem("officialx_user");
+        if (savedUser) {
+          try {
+            setUser(JSON.parse(savedUser));
+            setGuilds(MOCK_GUILDS);
+          } catch {
+            localStorage.removeItem("officialx_user");
+          }
         }
       }
+    } finally {
       setIsLoading(false);
-    };
+    }
+  };
 
+  useEffect(() => {
     checkSession();
   }, []);
 
   const login = () => {
-    // In production, redirect to Discord OAuth
-    // window.location.href = getDiscordOAuthURL();
+    if (isDemoMode()) {
+      // Demo mode: simulate login
+      setUser(MOCK_USER);
+      setGuilds(MOCK_GUILDS);
+      localStorage.setItem("officialx_user", JSON.stringify(MOCK_USER));
+      return;
+    }
 
-    // For demo, simulate login
-    setUser(MOCK_USER);
-    localStorage.setItem("officialx_user", JSON.stringify(MOCK_USER));
+    // Real OAuth: redirect to Discord
+    window.location.href = "/api/auth/discord";
   };
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem("officialx_user");
+  const logout = async () => {
+    try {
+      if (!isDemoMode()) {
+        await fetch("/api/auth/logout", {
+          method: "POST",
+          credentials: "include",
+        });
+      }
+    } catch (error) {
+      console.error("Logout error:", error);
+    } finally {
+      // Clear local state
+      setUser(null);
+      setGuilds([]);
+      localStorage.removeItem("officialx_user");
+
+      // Clear cookies manually as backup
+      document.cookie = "officialx_user=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+    }
+  };
+
+  const refreshSession = async () => {
+    setIsLoading(true);
+    await checkSession();
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        guilds,
         isLoading,
         isAuthenticated: !!user,
         login,
         logout,
+        refreshSession,
       }}
     >
       {children}
